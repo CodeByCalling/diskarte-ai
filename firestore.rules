@@ -1,0 +1,24 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // User Profiles
+    // Section 6.1: Users collection
+    match /users/{userId} {
+      // Users can read/write only their own document
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Chat Logs Sub-collection
+      // Section 6.1: chat_logs
+      match /chat_logs/{logId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: false;
+    }
+  }
+}
