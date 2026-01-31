@@ -1,6 +1,22 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/action_chip_bar.dart';
+import '../widgets/subscription_expired_modal.dart';
+import '../../../services/ai_service.dart';
+
+class ActionChipItem {
+  final String label;
+  final String textPayload;
+  final bool isReplacement;
+
+  const ActionChipItem({
+    required this.label,
+    required this.textPayload,
+    this.isReplacement = true,
+  });
+}
 
 class ChatMessage {
   final String text;
@@ -18,14 +34,20 @@ class ChatScreen extends StatefulWidget {
   final String featureTitle;
   final String featureSubtitle;
   final String placeholderText;
+  final List<String> ghostTexts;
+  final List<ActionChipItem> actionChips;
   final Future<String> Function(String input) onSendMessage;
+  final Stream<QuerySnapshot>? messageStream;
 
   const ChatScreen({
     super.key,
     required this.featureTitle,
     required this.featureSubtitle,
     required this.placeholderText,
+    this.ghostTexts = const [],
+    this.actionChips = const [],
     required this.onSendMessage,
+    this.messageStream,
   });
 
   @override
@@ -33,52 +55,71 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final List<ChatMessage> _messages = [];
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isLoading = false;
+  
+  // Ghost Text Logic
+  int _currentGhostIndex = 0;
+  Timer? _ghostTimer;
+  String get _activePlaceholder => widget.ghostTexts.isNotEmpty 
+      ? widget.ghostTexts[_currentGhostIndex] 
+      : widget.placeholderText;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.ghostTexts.isNotEmpty) {
+      _startGhostTimer();
+    }
+  }
+
+  void _startGhostTimer() {
+    _ghostTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      if (mounted) {
+        setState(() {
+          _currentGhostIndex = (_currentGhostIndex + 1) % widget.ghostTexts.length;
+        });
+      }
+    });
+  }
 
   void _handleSubmit(String text) async {
     if (text.trim().isEmpty) return;
 
-    final userMessage = ChatMessage(
-      text: text,
-      type: MessageType.user,
-      timestamp: DateTime.now(),
-    );
-
     setState(() {
-      _messages.add(userMessage);
       _isLoading = true;
     });
 
     _textController.clear();
-    _scrollToBottom();
 
     try {
       final response = await widget.onSendMessage(text);
-      
-      final aiMessage = ChatMessage(
-        text: response,
-        type: MessageType.ai,
-        timestamp: DateTime.now(),
-      );
 
-      setState(() {
-        _messages.add(aiMessage);
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
 
-      _scrollToBottom();
+      // Check for Subscription Expiry
+      if (response == 'SUBSCRIPTION_EXPIRED' && mounted) {
+        showModalBottomSheet(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          builder: (context) => const SubscriptionExpiredModal(),
+        );
+      }
     } catch (e) {
-      setState(() {
-        _messages.add(ChatMessage(
-          text: 'Sorry, may error. Please try again.',
-          type: MessageType.ai,
-          timestamp: DateTime.now(),
-        ));
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
     }
   }
 
@@ -118,44 +159,70 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           // Messages List
+          // Messages List
           Expanded(
-            child: _messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.chat_bubble_outline,
-                          size: 64,
-                          color: Colors.grey[400],
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Start a conversation',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.grey[600],
+            child: widget.messageStream == null
+                ? const Center(child: Text('Persistence not enabled'))
+                : StreamBuilder<QuerySnapshot>(
+                    stream: widget.messageStream,
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return Center(child: Text('Error: ${snapshot.error}'));
+                      }
+                      if (!snapshot.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+
+                      final docs = snapshot.data!.docs;
+                      if (docs.isEmpty) {
+                        return Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.chat_bubble_outline,
+                                size: 64,
+                                color: Colors.grey[400],
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Start a conversation',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                      return Column(
-                        children: [
-                          MessageBubble(
-                            message: message.text,
-                            type: message.type,
-                            timestamp: message.timestamp,
-                          ),
-                          if (message.type == MessageType.ai)
-                            ActionChipBar(messageText: message.text),
-                        ],
+                        );
+                      }
+
+                      return ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        reverse: true, // Newest at bottom
+                        itemCount: docs.length,
+                        itemBuilder: (context, index) {
+                          final doc = docs[index];
+                          final data = doc.data() as Map<String, dynamic>;
+                          final content = data['content'] as String? ?? '';
+                          final sender = data['sender'] as String? ?? 'user';
+                          final timestamp = (data['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
+                          
+                          final type = sender == 'user' ? MessageType.user : MessageType.ai;
+
+                          return Column(
+                            children: [
+                              MessageBubble(
+                                message: content,
+                                type: type,
+                                timestamp: timestamp,
+                              ),
+                              if (type == MessageType.ai)
+                                ActionChipBar(messageText: content),
+                            ],
+                          );
+                        },
                       );
                     },
                   ),
@@ -185,6 +252,52 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
 
+          // Action Chips (Thumb-Friendly: Above Input)
+          if (widget.actionChips.isNotEmpty)
+            Container(
+              height: 50,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: ListView.separated(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                scrollDirection: Axis.horizontal,
+                itemCount: widget.actionChips.length,
+                separatorBuilder: (context, index) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final chip = widget.actionChips[index];
+                  return ActionChip(
+                    label: Text(
+                      chip.label,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF002D72),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    backgroundColor: Colors.white,
+                    side: BorderSide(color: const Color(0xFF002D72).withOpacity(0.2)),
+                    elevation: 1,
+                    onPressed: () {
+                      if (chip.isReplacement) {
+                        _textController.text = chip.textPayload;
+                      } else {
+                        // Append logic: Add space if needed
+                        final current = _textController.text;
+                        if (current.isNotEmpty && !current.endsWith(' ')) {
+                           _textController.text = '$current ${chip.textPayload}';
+                        } else {
+                           _textController.text = '$current${chip.textPayload}';
+                        }
+                      }
+                      // Move cursor to end
+                      _textController.selection = TextSelection.fromPosition(
+                        TextPosition(offset: _textController.text.length),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+
           // Input Area (Thumb-Friendly: Bottom of screen)
           Container(
             decoration: BoxDecoration(
@@ -206,7 +319,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       child: TextField(
                         controller: _textController,
                         decoration: InputDecoration(
-                          hintText: widget.placeholderText,
+                          hintText: _activePlaceholder,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(24),
                             borderSide: BorderSide.none,
@@ -253,6 +366,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _ghostTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();

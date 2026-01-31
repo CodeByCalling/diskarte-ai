@@ -6,19 +6,32 @@ service cloud.firestore {
     // User Profiles
     // Section 6.1: Users collection
     match /users/{userId} {
-      // Users can read/write only their own document
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Users can read their own document
+      allow read: if request.auth != null && request.auth.uid == userId;
+      
+      // Users can create their document but cannot set subscription fields
+      allow create: if request.auth != null && request.auth.uid == userId 
+                    && !('subscription_end_timestamp' in request.resource.data) 
+                    && !('is_active' in request.resource.data);
+      
+      // Users can update non-sensitive fields but cannot modify subscription status
+      allow update: if request.auth != null && request.auth.uid == userId 
+                    && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['subscription_end_timestamp', 'is_active']);
       
       // Chat Logs Sub-collection
       // Section 6.1: chat_logs
       match /chat_logs/{logId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
+        
+        match /messages/{messageId} {
+          allow read, write: if request.auth != null && request.auth.uid == userId;
+        }
       }
     }
     
     // Default deny
     match /{document=**} {
-      allow read, write: false;
+      allow read, write: if false;
     }
   }
 }

@@ -1,14 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'features/auth/screens/login_screen.dart';
+import 'features/auth/screens/login_screen.dart'; // Keep for reference if needed
+import 'features/landing/screens/landing_page_screen.dart';
 import 'firebase_options.dart'; // We need to generate this, but for now we might mock or expect it.
+
+import 'dart:ui';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Pass all uncaught "fatal" errors from the framework to Crashlytics
+  FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterFatalError;
+
+  // Pass all uncaught asynchronous errors that aren't handled by the Flutter framework to Crashlytics
+  PlatformDispatcher.instance.onError = (error, stack) {
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return true;
+  };
+
   runApp(const DiskarteApp());
 }
 
@@ -30,7 +44,7 @@ class DiskarteApp extends StatelessWidget {
         useMaterial3: true,
         textTheme: GoogleFonts.robotoTextTheme(), // Standard readable font
       ),
-      home: const LoginScreen(),
+      home: const LandingPageScreen(),
     );
   }
 }

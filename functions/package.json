@@ -1,0 +1,30 @@
+{
+  "name": "functions",
+  "scripts": {
+    "build": "tsc",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "engines": {
+    "node": "20"
+  },
+  "main": "lib/index.js",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@types/markdown-it": "^14.1.2",
+    "axios": "^1.13.4",
+    "cors": "^2.8.6",
+    "firebase-admin": "^11.5.0",
+    "firebase-functions": "^4.3.1",
+    "markdown-it": "^14.1.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/node": "^25.0.10",
+    "typescript": "^4.9.5"
+  },
+  "private": true
+}

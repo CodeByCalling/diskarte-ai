@@ -1,4 +1,7 @@
-import 'package:google_generative_ai/google_generative_ai.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 enum FeatureType {
   bureaucracyBreaker,
@@ -8,87 +11,99 @@ enum FeatureType {
 }
 
 class AiService {
-  // Gemini API Key
-  static const String _apiKey = 'AIzaSyA8IXS7LYbDLHEtig5eGSg68N2Z0GcNvBA';
-  
-  late final GenerativeModel _model;
+  // Use the HTTP endpoint directly to avoid dart2js Cloud Functions SDK issues (Int64)
+  static const String _functionUrl = 'https://asia-southeast1-diskarte-ai.cloudfunctions.net/callGemini';
 
-  AiService() {
-    _model = GenerativeModel(
-      model: 'gemini-2.5-flash-lite',
-      apiKey: _apiKey,
-    );
-  }
+  static const String subscriptionExpiredMessage = 'SUBSCRIPTION_EXPIRED';
 
-  /// Get persona system instruction based on feature type (PRD Section 4.2)
-  String _getPersonaPrompt(FeatureType feature) {
-    switch (feature) {
-      case FeatureType.bureaucracyBreaker:
-        return '''You are a formal correspondence expert for Philippine government documents. 
-Use High Filipino-English suitable for government officials. Be formal and respectful.
-Help users write or understand government forms like:
-- Barangay Indigency requests
-- Mayor's office medical assistance letters  
-- Passport appointment queries
-- Complaints and formal letters to officials
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
 
-Be concise and professional.''';
-
-      case FeatureType.diskarteToolkit:
-        return '''You are a helpful Filipino assistant specializing in work and resume improvement.
-Help with:
-- Resume writing (from service crew to BPO-ready)
-- Seller reply templates (Shopee/Lazada)
-- Grammar polish for professional communication
-
-Reply in the same language the user uses (Taglish if they use Taglish).
-Be concise. Do not use flowery words. Focus on practical, actionable advice.''';
-
-      case FeatureType.aralMasa:
-        return '''You are a homework helper who explains concepts step-by-step.
-Your audience is Filipino students and parents who need help with schoolwork.
-
-Explain in Tagalog or English (match the user's language).
-Break down concepts clearly. Use simple examples.
-Be patient and educational. Encourage learning, not just giving answers.''';
-
-      case FeatureType.diskarteCoach:
-        return '''You are a stoic friend and motivational coach.
-Use "Tropa" (friend) tone with Filipino slang like:
-- "Lodi" (idol, backwards)
-- "Petmalu" (amazing, "malupit" backwards)  
-- "Kaya mo yan" (You can do it)
-- "Banat ulit" (Try again)
-
-Be empowering but realistic. If the user wants to quit, remind them: "Kaya mo yan, banat ulit!"
-Focus on grit, resilience, and ambition. No religious references.''';
+  /// Save message to Firestore
+  Future<void> _saveMessage(String userId, String message, String sender, FeatureType feature) async {
+    try {
+      await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('chat_logs')
+          .doc(feature.name)
+          .collection('messages')
+          .add({
+        'content': message,
+        'sender': sender,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error saving message to Firestore: $e');
+      // Don't block the UI/flow if save fails, just log it.
     }
   }
 
-  /// Send message to Gemini and get response
+  /// Send message to Gemini via Cloud Function (HTTP Trigger)
   Future<String> sendMessage(String userMessage, FeatureType feature) async {
     try {
-      final systemPrompt = _getPersonaPrompt(feature);
-      
-      // Combine system prompt with user message
-      final fullPrompt = '$systemPrompt\n\nUser: $userMessage\n\nAssistant:';
-      
-      final content = [Content.text(fullPrompt)];
-      final response = await _model.generateContent(content);
+      var user = _auth.currentUser;
+      if (user == null) {
+        try {
+          print("User is null. Attempting auto-anonymous login...");
+          await _auth.signInAnonymously();
+          user = _auth.currentUser;
+        } catch (e) {
+          print("Auto-Auth Failed: $e");
+        }
+      }
 
-      return response.text ?? 'Sorry, I couldn\'t generate a response. Please try again.';
-    } catch (e) {
-      // Show detailed error for debugging
-      print('AI Service Error: $e');
+      if (user == null) {
+        return 'Unable to start chat (Auth Failed). Please refresh.';
+      }
+
+      // 1. Save User Message (Fire and Forget - don't await)
+      _saveMessage(user.uid, userMessage, 'user', feature);
+
+      String token;
+      try {
+        token = await user.getIdToken().timeout(const Duration(seconds: 10)) ?? '';
+      } catch (e) {
+        print('Auth Token Timeout: $e');
+        return 'Connection error (Auth). Please refresh and try again.';
+      }
       
-      // Handle specific errors
-      if (e.toString().contains('API_KEY') || e.toString().contains('API key')) {
-        return 'ERROR: API Key issue - $e';
+      if (token.isEmpty) {
+         return 'Authentication failed (No Token). Please login again.';
       }
-      if (e.toString().contains('CORS') || e.toString().contains('XMLHttpRequest')) {
-        return 'ERROR: Browser blocking request (CORS). Need to use Cloud Functions instead.';
+
+      final headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      };
+
+      final response = await http.post(
+        Uri.parse(_functionUrl),
+        headers: headers,
+        body: jsonEncode({
+          'message': userMessage,
+          'featureType': feature.name,
+        }),
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        final aiResponse = decoded['text'] as String;
+        
+        // 2. Save AI Response (Fire and Forget)
+        _saveMessage(user.uid, aiResponse, 'ai', feature);
+        
+        return aiResponse;
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        print('AI Service Auth Error (HTTP ${response.statusCode}): ${response.body}');
+        return subscriptionExpiredMessage;
+      } else {
+        print('AI Service Error (HTTP ${response.statusCode}): ${response.body}');
+        return 'Sorry, I encountered a server error (${response.statusCode}). Please try again later.';
       }
-      return 'ERROR: $e\n\nPlease check browser console for details.';
+    } catch (e) {
+      print('AI Service Error: $e');
+      return 'Sorry, I encountered an error. Please try again later. ($e)';
     }
   }
 }
