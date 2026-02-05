@@ -43,18 +43,29 @@ class AiService {
   Future<String> sendMessage(String userMessage, FeatureType feature) async {
     try {
       var user = _auth.currentUser;
+      
+      // Retry mechanism for anonymous login if user is missing
       if (user == null) {
-        try {
-          print("User is null. Attempting auto-anonymous login...");
-          await _auth.signInAnonymously();
-          user = _auth.currentUser;
-        } catch (e) {
-          print("Auto-Auth Failed: $e");
+        int retries = 3;
+        while (retries > 0) {
+          try {
+            print("User is null. Attempting auto-anonymous login... (Attempts left: $retries)");
+            final userCredential = await _auth.signInAnonymously();
+            user = userCredential.user;
+            if (user != null) break;
+          } catch (e) {
+            print("Auto-Auth attempt failed: $e");
+            retries--;
+            if (retries == 0) {
+              return 'Unable to start chat. Auth Error: ${e.toString().replaceAll('firebase_auth/', '')}. Please refresh.';
+            }
+            await Future.delayed(const Duration(milliseconds: 1000));
+          }
         }
       }
 
       if (user == null) {
-        return 'Unable to start chat (Auth Failed). Please refresh.';
+        return 'Unable to start chat (Auth Failed - Unknown). Please refresh.';
       }
 
       // 1. Save User Message (Fire and Forget - don't await)
